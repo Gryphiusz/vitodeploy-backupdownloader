@@ -3,11 +3,9 @@
 namespace App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader;
 
 use App\Plugins\AbstractPlugin;
-use App\Plugins\RegisterServerFeature;
-use App\Plugins\RegisterServerFeatureAction;
-use App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Actions\GenerateBackupDownloadLink;
-use App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Http\Controllers\BackupBrowserController;
 use App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Http\Controllers\DownloadBackupController;
+use App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Http\Controllers\DownloadBackupFromMenuController;
+use App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Services\BackupFilesMenuPatchService;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Route;
@@ -17,37 +15,36 @@ class Plugin extends AbstractPlugin
 {
     protected string $name = 'Backup Downloader';
 
-    protected string $description = 'Generate secure links to download server backup files.';
+    protected string $description = 'Adds a Download action to backup file menus and serves secure one-time downloads.';
+
+    private static bool $menuPatchChecked = false;
 
     public function boot(): void
     {
-        RegisterServerFeature::make('backup-downloader')
-            ->label('Backup Downloader')
-            ->description('Generate temporary links to download backup files from this server.')
-            ->register();
-
-        RegisterServerFeatureAction::make('backup-downloader', 'generate-link')
-            ->label('Backup Browser')
-            ->handler(GenerateBackupDownloadLink::class)
-            ->register();
+        $this->applyBackupMenuPatchOnce();
 
         Route::middleware(['web', 'auth', 'has-project'])
             ->get('/plugins/backup-downloader/download/{token}', DownloadBackupController::class)
             ->name('plugins.backup-downloader.download');
 
         Route::middleware(['web', 'auth', 'has-project'])
-            ->get('/plugins/backup-downloader/servers/{server}/backups', BackupBrowserController::class)
-            ->name('plugins.backup-downloader.backups');
+            ->get(
+                '/plugins/backup-downloader/servers/{server}/backups/{backup}/files/{backupFile}/download',
+                DownloadBackupFromMenuController::class
+            )
+            ->name('plugins.backup-downloader.direct-download');
     }
 
     public function install(): void
     {
         $this->runMigrations();
+        $this->applyBackupMenuPatchOnce();
     }
 
     public function enable(): void
     {
         $this->runMigrations();
+        $this->applyBackupMenuPatchOnce();
     }
 
     public function uninstall(): void
@@ -92,5 +89,22 @@ class Plugin extends AbstractPlugin
     private function migrationPath(): string
     {
         return __DIR__.'/Database/migrations';
+    }
+
+    private function applyBackupMenuPatchOnce(): void
+    {
+        if (self::$menuPatchChecked) {
+            return;
+        }
+
+        self::$menuPatchChecked = true;
+
+        try {
+            app(BackupFilesMenuPatchService::class)->apply();
+        } catch (\Throwable $exception) {
+            Log::warning('Backup Downloader plugin could not apply backups menu patch', [
+                'error' => $exception->getMessage(),
+            ]);
+        }
     }
 }

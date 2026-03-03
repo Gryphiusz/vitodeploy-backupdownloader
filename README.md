@@ -1,15 +1,14 @@
 # Backup Downloader Plugin
 
-Adds a VitoDeploy server feature to generate temporary, single-use links for downloading backup files.
+Adds a `Download` option to the backup-file row menu in Vito and serves secure one-time downloads.
 
 ## Features
 
-- Registers server feature: `Backup Downloader`
-- Action: `Backup Browser`
-- Adds a direct link to Vito's native backups page for the current server
-- Uses a single modal form with a 7-day backup calendar overview and direct backup picker
-- Generates short-lived token links tied to the current user and server
-- Downloads backup files through Vito using provider -> server tmp -> Vito tmp -> browser flow
+- Patches Vito core file menu: `resources/js/pages/backups/components/file-columns.tsx`
+- Adds row action in the 3-dots menu: `Download`
+- Action creates a one-time, short-lived token and immediately redirects to the download endpoint
+- Token is user-scoped and marked used after successful download
+- Auto-reapplies the menu patch when the plugin boots (helps after Vito updates overwrite core file)
 
 ## Installation (Local Development)
 
@@ -21,19 +20,19 @@ Then in Vito UI:
 
 1. Go to `Admin > Plugins > Discover`
 2. Install and enable `Backup Downloader`
+3. Rebuild frontend assets in Vito root if needed: `npm run build`
 
 ## Usage
 
 1. Open a server
-2. Go to `Features > Backup Downloader`
-3. Run `Backup Browser`
-4. Use `Open Backups Page` to inspect backups in Vito's original backups UI
-5. In the action modal use the last-7-days overview to see available backups per day
-6. Select backup file (`#ID | TYPE | SITE | SOURCE | created_at`) and expiration
-7. Submit to generate the download link (URL is shown in the success message)
+2. Go to `Backups`
+3. Open backup `files`
+4. Click the 3-dots menu on a backup file row
+5. Click `Download`
 
 ## Notes
 
 - Links are single-use and user-scoped.
-- If no backup files are listed, run a backup from the server backup page first.
+- If Vito is updated and overwrites the core file, this plugin patches it again on next boot.
+- If your installation uses prebuilt frontend assets, run `npm run build` after update/patch.
 - Plugin data is stored in `backup_downloader_links`.
