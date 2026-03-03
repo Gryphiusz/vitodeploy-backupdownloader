@@ -6,6 +6,8 @@ use App\DTOs\DynamicField;
 use App\DTOs\DynamicForm;
 use App\Enums\BackupFileStatus;
 use App\Models\BackupFile;
+use App\Models\Plugin as PluginModel;
+use App\Models\PluginError;
 use App\Models\Site;
 use App\ServerFeatures\Action;
 use App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Models\BackupDownloadLink;
@@ -33,17 +35,24 @@ class GenerateBackupDownloadLink extends Action
         try {
             return $this->buildForm();
         } catch (\Throwable $exception) {
+            $this->reportRuntimePluginError($exception);
+
             Log::warning('Backup Downloader form rendering failed', [
                 'server_id' => $this->server->id,
                 'error' => $exception->getMessage(),
             ]);
+
+            $errorLabel = Str::limit(
+                sprintf('%s: %s', class_basename($exception), $exception->getMessage()),
+                220
+            );
 
             return DynamicForm::make([
                 DynamicField::make('backup_downloader_form_error')
                     ->alert()
                     ->options(['type' => 'warning'])
                     ->label('Backup Downloader Temporary Issue')
-                    ->description('Could not render backup list safely. Please refresh, or check plugin logs for details.'),
+                    ->description('Could not render backup list safely. '.$errorLabel),
             ]);
         }
     }
@@ -210,6 +219,7 @@ class GenerateBackupDownloadLink extends Action
             ->where('server_id', $this->server->id)
             ->whereNull('used_at')
             ->where('expires_at', '>', now())
+            ->whereHas('backupFile.backup')
             ->with(['backupFile.backup.database'])
             ->latest('id')
             ->first();
@@ -254,7 +264,7 @@ class GenerateBackupDownloadLink extends Action
 
     private function backupFileLabel(BackupFile $file, Collection $sites): string
     {
-        $type = strtoupper($file->backup->type->value);
+        $type = strtoupper((string) ($file->backup?->type?->value ?? 'unknown'));
         $source = $this->backupSourceLabel($file);
         $site = $this->backupSiteLabel($file, $sites);
         $createdAt = $file->created_at?->toDateTimeString() ?? '-';
@@ -264,6 +274,10 @@ class GenerateBackupDownloadLink extends Action
 
     private function backupSourceLabel(BackupFile $file): string
     {
+        if ($file->backup === null) {
+            return 'SOURCE:(backup-missing)';
+        }
+
         if ($file->backup->type->value === 'database') {
             return 'DB:'.($file->backup->database?->name ?? '(deleted)');
         }
@@ -278,6 +292,10 @@ class GenerateBackupDownloadLink extends Action
 
     private function backupSiteLabel(BackupFile $file, Collection $sites): string
     {
+        if ($file->backup === null) {
+            return 'SITE:unknown';
+        }
+
         if ($file->backup->type->value === 'file') {
             $backupPath = (string) $file->backup->path;
             $site = $this->matchSiteByPath($backupPath, $sites);
@@ -441,6 +459,21 @@ class GenerateBackupDownloadLink extends Action
         }
 
         return null;
+    }
+
+    private function reportRuntimePluginError(\Throwable $exception): void
+    {
+        try {
+            $plugin = PluginModel::query()
+                ->where('namespace', 'App\\Vito\\Plugins\\Gryphiusz\\VitodeployBackupdownloader\\Plugin')
+                ->first();
+
+            if ($plugin !== null) {
+                PluginError::createFromException($exception, $plugin);
+            }
+        } catch (\Throwable) {
+            // Ignore secondary failures while reporting plugin runtime errors.
+        }
     }
 
     private function extractBackupFileId(string $selectedBackup): ?int
