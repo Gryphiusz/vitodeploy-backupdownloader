@@ -6,6 +6,7 @@ use App\DTOs\DynamicField;
 use App\DTOs\DynamicForm;
 use App\Enums\BackupFileStatus;
 use App\Models\BackupFile;
+use App\Models\Site;
 use App\ServerFeatures\Action;
 use App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Models\BackupDownloadLink;
 use Illuminate\Database\Eloquent\Collection;
@@ -28,30 +29,42 @@ class GenerateBackupDownloadLink extends Action
 
     public function form(): ?DynamicForm
     {
+        $sites = $this->serverSites();
+
         $fields = [
             DynamicField::make('backup_downloader_info')
                 ->alert()
                 ->options(['type' => 'info'])
-                ->description($this->backupSummaryText()),
+                ->description($this->backupSummaryText($sites)),
         ];
 
         $activeLink = $this->activeLink();
         if ($activeLink !== null) {
+            $activeLinkDescription = sprintf(
+                'Backup file #%d. Expires at %s.',
+                $activeLink->backup_file_id,
+                $activeLink->expires_at->toDateTimeString()
+            );
+
+            if ($activeLink->backupFile !== null) {
+                $activeLinkDescription = sprintf(
+                    '%s. Expires at %s.',
+                    $this->backupFileLabel($activeLink->backupFile, $sites),
+                    $activeLink->expires_at->toDateTimeString()
+                );
+            }
+
             $fields[] = DynamicField::make('backup_downloader_active_link')
                 ->alert()
                 ->label('Latest Generated Link')
-                ->description(sprintf(
-                    'Backup file #%d. Expires at %s.',
-                    $activeLink->backup_file_id,
-                    $activeLink->expires_at->toDateTimeString()
-                ))
+                ->description($activeLinkDescription)
                 ->link(
                     'Download Backup',
                     route('plugins.backup-downloader.download', ['token' => $activeLink->token])
                 );
         }
 
-        $options = $this->backupFileOptions();
+        $options = $this->backupFileOptions($sites);
         if ($options === []) {
             $fields[] = DynamicField::make('backup_downloader_empty')
                 ->alert()
@@ -61,12 +74,12 @@ class GenerateBackupDownloadLink extends Action
             return DynamicForm::make($fields);
         }
 
-        $fields[] = DynamicField::make('backup_file_id')
+        $fields[] = DynamicField::make('backup_file')
             ->select()
-            ->label('Backup File ID')
+            ->label('Backup')
             ->options($options)
             ->default($options[0])
-            ->description('Select the backup file ID you want to download.');
+            ->description('Format: ID | type | source | site | created_at');
 
         $fields[] = DynamicField::make('expiration_minutes')
             ->select()
@@ -81,13 +94,22 @@ class GenerateBackupDownloadLink extends Action
     public function handle(Request $request): void
     {
         Validator::make($request->all(), [
-            'backup_file_id' => ['required', 'integer', 'exists:backup_files,id'],
+            'backup_file' => ['nullable', 'string', 'max:1000'],
+            'backup_file_id' => ['nullable', 'integer'],
             'expiration_minutes' => ['required', 'integer', 'in:5,15,30,60'],
         ])->validate();
 
+        $backupFileId = $this->extractBackupFileId((string) $request->input('backup_file', ''));
+        if ($backupFileId === null && $request->filled('backup_file_id')) {
+            $backupFileId = (int) $request->input('backup_file_id');
+        }
+        if ($backupFileId === null) {
+            abort(422, 'Please select a backup file.');
+        }
+
         $backupFile = BackupFile::query()
             ->with(['backup'])
-            ->findOrFail((int) $request->input('backup_file_id'));
+            ->findOrFail($backupFileId);
 
         if ((int) $backupFile->backup->server_id !== (int) $this->server->id) {
             abort(422, 'Selected backup file does not belong to this server.');
@@ -127,35 +149,23 @@ class GenerateBackupDownloadLink extends Action
     /**
      * @return array<int, string>
      */
-    private function backupFileOptions(): array
+    private function backupFileOptions(Collection $sites): array
     {
         return $this->recentAvailableBackupFiles()
-            ->pluck('id')
-            ->map(fn (int $id): string => (string) $id)
+            ->map(fn (BackupFile $file): string => $this->backupFileLabel($file, $sites))
             ->values()
             ->all();
     }
 
-    private function backupSummaryText(): string
+    private function backupSummaryText(Collection $sites): string
     {
         $files = $this->recentAvailableBackupFiles();
         if ($files->isEmpty()) {
             return 'No backup files found for this server.';
         }
 
-        return $files
-            ->map(function (BackupFile $file): string {
-                $extension = $file->backup->type->value === 'database' ? '.zip' : '.tar.gz';
-                $name = $file->name.$extension;
-
-                return sprintf(
-                    '#%d | %s | status=%s | %s',
-                    $file->id,
-                    $name,
-                    $file->status->value,
-                    $file->created_at?->toDateTimeString() ?? '-'
-                );
-            })
+        return "Available backups (ID | type | source | site | created_at):\n".$files
+            ->map(fn (BackupFile $file): string => $this->backupFileLabel($file, $sites))
             ->implode("\n");
     }
 
@@ -171,6 +181,7 @@ class GenerateBackupDownloadLink extends Action
             ->where('server_id', $this->server->id)
             ->whereNull('used_at')
             ->where('expires_at', '>', now())
+            ->with(['backupFile.backup.database'])
             ->latest('id')
             ->first();
     }
@@ -193,5 +204,109 @@ class GenerateBackupDownloadLink extends Action
             ->latest('id')
             ->limit(20)
             ->get();
+    }
+
+    /**
+     * @return Collection<int, Site>
+     */
+    private function serverSites(): Collection
+    {
+        return Site::query()
+            ->where('server_id', $this->server->id)
+            ->get(['id', 'domain', 'path', 'type_data']);
+    }
+
+    private function backupFileLabel(BackupFile $file, Collection $sites): string
+    {
+        $type = strtoupper($file->backup->type->value);
+        $source = $this->backupSourceLabel($file);
+        $site = $this->backupSiteLabel($file, $sites);
+        $createdAt = $file->created_at?->toDateTimeString() ?? '-';
+
+        return sprintf('#%d | %s | %s | %s | %s', $file->id, $type, $source, $site, $createdAt);
+    }
+
+    private function backupSourceLabel(BackupFile $file): string
+    {
+        if ($file->backup->type->value === 'database') {
+            return 'DB:'.($file->backup->database?->name ?? '(deleted)');
+        }
+
+        $path = trim((string) $file->backup->path);
+        if ($path === '') {
+            return 'PATH:(unknown)';
+        }
+
+        return 'PATH:'.$path;
+    }
+
+    private function backupSiteLabel(BackupFile $file, Collection $sites): string
+    {
+        if ($file->backup->type->value === 'file') {
+            $site = $this->matchSiteByPath((string) $file->backup->path, $sites);
+            if ($site !== null) {
+                return 'SITE:'.$site->domain;
+            }
+
+            return 'SITE:unknown';
+        }
+
+        $databaseName = (string) ($file->backup->database?->name ?? '');
+        $site = $this->matchSiteByDatabaseName($databaseName, $sites);
+        if ($site !== null) {
+            return 'SITE:'.$site->domain;
+        }
+
+        return 'SITE:unknown';
+    }
+
+    private function matchSiteByPath(string $path, Collection $sites): ?Site
+    {
+        $normalizedPath = rtrim(trim($path), '/');
+        if ($normalizedPath === '') {
+            return null;
+        }
+
+        /** @var ?Site $site */
+        $site = $sites
+            ->filter(function (Site $site) use ($normalizedPath): bool {
+                $sitePath = rtrim((string) $site->path, '/');
+                if ($sitePath === '') {
+                    return false;
+                }
+
+                return $normalizedPath === $sitePath || str_starts_with($normalizedPath, $sitePath.'/');
+            })
+            ->sortByDesc(fn (Site $site): int => strlen((string) $site->path))
+            ->first();
+
+        return $site;
+    }
+
+    private function matchSiteByDatabaseName(string $databaseName, Collection $sites): ?Site
+    {
+        $databaseName = trim($databaseName);
+        if ($databaseName === '') {
+            return null;
+        }
+
+        /** @var ?Site $site */
+        $site = $sites->first(function (Site $site) use ($databaseName): bool {
+            $typeData = is_array($site->type_data ?? null) ? $site->type_data : [];
+            $siteDatabaseName = (string) ($typeData['database'] ?? '');
+
+            return $siteDatabaseName !== '' && $siteDatabaseName === $databaseName;
+        });
+
+        return $site;
+    }
+
+    private function extractBackupFileId(string $selectedBackup): ?int
+    {
+        if (preg_match('/^\s*#?(\d+)\b/', $selectedBackup, $matches) !== 1) {
+            return null;
+        }
+
+        return (int) $matches[1];
     }
 }

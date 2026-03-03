@@ -25,7 +25,7 @@ Then in Vito UI:
 1. Open a server
 2. Go to `Features > Backup Downloader`
 3. Run `Generate Link`
-4. Select a `Backup File ID` and expiration window
+4. Select a backup entry (`ID | type | source | site | created_at`) and expiration window
 5. Open the generated link before it expires
 
 ## Notes
