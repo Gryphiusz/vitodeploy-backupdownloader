@@ -7,7 +7,7 @@ Adds a VitoDeploy server feature to generate temporary, single-use links for dow
 - Registers server feature: `Backup Downloader`
 - Action: `Backup Browser`
 - Adds a direct link to Vito's native backups page for the current server
-- Uses a 3-step wizard in the action modal: site -> backup type -> backup file
+- Uses a single modal form with wizard-style fields: site -> backup type -> backup file
 - Generates short-lived token links tied to the current user and server
 - Downloads backup files through Vito using provider -> server tmp -> Vito tmp -> browser flow
 
@@ -28,11 +28,8 @@ Then in Vito UI:
 2. Go to `Features > Backup Downloader`
 3. Run `Backup Browser`
 4. Use `Open Backups Page` to inspect backups in Vito's original backups UI
-5. In the action modal complete the wizard:
-6. Step 1 select site and submit
-7. Step 2 select backup type and submit
-8. Step 3 select backup file (`ID | type | source | site | created_at`) and expiration
-9. Open the generated link before it expires
+5. In the action modal select site, backup type, backup file (`ID | type | source | site | created_at`), and expiration
+6. Submit once to generate the download link
 
 ## Notes
 
