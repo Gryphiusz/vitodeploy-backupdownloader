@@ -8,9 +8,9 @@ class BackupFilesMenuPatchService
 {
     private const SOURCE_TARGET_FILE = 'resources/js/pages/backups/components/file-columns.tsx';
     private const BUILD_MANIFEST_FILE = 'public/build/manifest.json';
-    private const LEGACY_ROUTE_MARKER = "plugins.backup-downloader.direct-download";
-    private const SOURCE_URL_MARKER = '/plugins/backup-downloader/servers/${row.original.server_id}/backups/${row.original.backup_id}/files/${row.original.id}/download';
-    private const BUILD_URL_MARKER = '/plugins/backup-downloader/servers/"+';
+    private const LEGACY_ROUTE_MARKER = 'plugins.backup-downloader.direct-download';
+    private const SOURCE_ASSIGN_MARKER = 'window.location.assign(`/plugins/backup-downloader/servers/${row.original.server_id}/backups/${row.original.backup_id}/files/${row.original.id}/download`)';
+    private const BUILD_ASSIGN_MARKER = 'window.location.assign("/plugins/backup-downloader/servers/"+';
     private const INSERT_AFTER = "<DropdownMenuItem onSelect={(e) => e.preventDefault()}>Restore</DropdownMenuItem>\n              </RestoreBackup>";
     private const DELETE_LINE = '              <Delete file={row.original} />';
 
@@ -39,31 +39,51 @@ class BackupFilesMenuPatchService
             return false;
         }
 
-        if (str_contains($content, self::SOURCE_URL_MARKER)) {
+        if (str_contains($content, self::SOURCE_ASSIGN_MARKER)) {
             return false;
         }
 
-        if (str_contains($content, self::LEGACY_ROUTE_MARKER)) {
-            $updatedContent = preg_replace(
-                "/href=\\{route\\('plugins\\.backup-downloader\\.direct-download',\\s*\\{\\s*server:\\s*row\\.original\\.server_id,\\s*backup:\\s*row\\.original\\.backup_id,\\s*backupFile:\\s*row\\.original\\.id,\\s*\\}\\)\\}/m",
-                'href={`/plugins/backup-downloader/servers/${row.original.server_id}/backups/${row.original.backup_id}/files/${row.original.id}/download`}',
-                $content,
-                1,
-                $count
-            );
-
-            if (is_string($updatedContent) && $count > 0) {
-                return $this->writeFile($targetPath, $updatedContent);
-            }
-        }
-
-        $downloadMenuItem = <<<'TSX'
+        // Remove previously injected Download snippets (legacy route()/href variations) before inserting the final one.
+        $legacySourceItems = [
+            <<<'TSX'
+              <DropdownMenuItem asChild>
+                <a
+                  href={route('plugins.backup-downloader.direct-download', {
+                    server: row.original.server_id,
+                    backup: row.original.backup_id,
+                    backupFile: row.original.id,
+                  })}
+                >
+                  Download
+                </a>
+              </DropdownMenuItem>
+TSX,
+            <<<'TSX'
               <DropdownMenuItem asChild>
                 <a
                   href={`/plugins/backup-downloader/servers/${row.original.server_id}/backups/${row.original.backup_id}/files/${row.original.id}/download`}
                 >
                   Download
                 </a>
+              </DropdownMenuItem>
+TSX,
+        ];
+
+        foreach ($legacySourceItems as $legacySourceItem) {
+            $content = str_replace($legacySourceItem."\n", '', $content, $countWithBreak);
+            if ($countWithBreak < 1) {
+                $content = str_replace($legacySourceItem, '', $content);
+            }
+        }
+
+        $downloadMenuItem = <<<'TSX'
+              <DropdownMenuItem
+                onSelect={(event) => {
+                  event.preventDefault();
+                  window.location.assign(`/plugins/backup-downloader/servers/${row.original.server_id}/backups/${row.original.backup_id}/files/${row.original.id}/download`);
+                }}
+              >
+                Download
               </DropdownMenuItem>
 TSX;
 
@@ -144,21 +164,19 @@ TSX;
             return false;
         }
 
-        if (str_contains($content, self::BUILD_URL_MARKER)) {
+        if (str_contains($content, self::BUILD_ASSIGN_MARKER)) {
             return false;
         }
 
-        if (str_contains($content, self::LEGACY_ROUTE_MARKER)) {
-            $updatedLegacy = preg_replace_callback(
-                '/route\("plugins\.backup-downloader\.direct-download",\{server:(?<row>[A-Za-z_\$][A-Za-z0-9_\$]*)\.original\.server_id,backup:\k<row>\.original\.backup_id,backupFile:\k<row>\.original\.id\}\)/',
-                static fn (array $matches): string => '"/plugins/backup-downloader/servers/"+'.$matches['row'].'.original.server_id+"/backups/"+'.$matches['row'].'.original.backup_id+"/files/"+'.$matches['row'].'.original.id+"/download"',
-                $content,
-                1,
-                $count
-            );
-
-            if (is_string($updatedLegacy) && $count > 0) {
-                return $this->writeFile($chunkPath, $updatedLegacy);
+        // Remove previously injected Download snippets so we keep a single canonical item.
+        $legacyDownloadPatterns = [
+            '/,e\.jsx\([A-Za-z_\$][A-Za-z0-9_\$]*,\{asChild:!0,children:e\.jsx\("a",\{href:route\("plugins\.backup-downloader\.direct-download",\{server:(?<row>[A-Za-z_\$][A-Za-z0-9_\$]*)\.original\.server_id,backup:\k<row>\.original\.backup_id,backupFile:\k<row>\.original\.id\}\),children:"Download"\}\)\}\)/',
+            '/,e\.jsx\([A-Za-z_\$][A-Za-z0-9_\$]*,\{asChild:!0,children:e\.jsx\("a",\{href:"\/plugins\/backup-downloader\/servers\/"\+(?<row>[A-Za-z_\$][A-Za-z0-9_\$]*)\.original\.server_id\+"\/backups\/"\+\k<row>\.original\.backup_id\+"\/files\/"\+\k<row>\.original\.id\+"\/download",children:"Download"\}\)\}\)/',
+        ];
+        foreach ($legacyDownloadPatterns as $legacyDownloadPattern) {
+            $content = preg_replace($legacyDownloadPattern, '', $content);
+            if (! is_string($content)) {
+                return false;
             }
         }
 
@@ -177,7 +195,7 @@ TSX;
         $deleteCall = $deleteCallMatch[0];
         $rowAlias = $deleteCallMatch['row'];
 
-        $downloadCall = ',e.jsx('.$menuItemAlias.',{asChild:!0,children:e.jsx("a",{href:"/plugins/backup-downloader/servers/"+'.$rowAlias.'.original.server_id+"/backups/"+'.$rowAlias.'.original.backup_id+"/files/"+'.$rowAlias.'.original.id+"/download",children:"Download"})})';
+        $downloadCall = ',e.jsx('.$menuItemAlias.',{onSelect:m=>{m.preventDefault(),window.location.assign("/plugins/backup-downloader/servers/"+'.$rowAlias.'.original.server_id+"/backups/"+'.$rowAlias.'.original.backup_id+"/files/"+'.$rowAlias.'.original.id+"/download")},children:"Download"})';
         $updatedContent = preg_replace('/'.preg_quote($deleteCall, '/').'/', $downloadCall.$deleteCall, $content, 1, $count);
 
         if (! is_string($updatedContent) || $count < 1) {
