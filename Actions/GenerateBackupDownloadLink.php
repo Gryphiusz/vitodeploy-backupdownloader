@@ -19,7 +19,7 @@ class GenerateBackupDownloadLink extends Action
 {
     public function name(): string
     {
-        return 'Generate Link';
+        return 'Backup Browser';
     }
 
     public function active(): bool
@@ -32,6 +32,14 @@ class GenerateBackupDownloadLink extends Action
         $sites = $this->serverSites();
 
         $fields = [
+            DynamicField::make('backup_downloader_open_backups_page')
+                ->alert()
+                ->label('Open Server Backups')
+                ->description('View all backups using Vito\'s built-in backups page, then come back here to generate a download link.')
+                ->link(
+                    'Open Backups Page',
+                    route('plugins.backup-downloader.backups', ['server' => $this->server->id])
+                ),
             DynamicField::make('backup_downloader_info')
                 ->alert()
                 ->options(['type' => 'info'])
@@ -243,9 +251,25 @@ class GenerateBackupDownloadLink extends Action
     private function backupSiteLabel(BackupFile $file, Collection $sites): string
     {
         if ($file->backup->type->value === 'file') {
-            $site = $this->matchSiteByPath((string) $file->backup->path, $sites);
+            $backupPath = (string) $file->backup->path;
+            $site = $this->matchSiteByPath($backupPath, $sites);
+            if ($site === null) {
+                $site = $this->matchSiteByDomainInPath($backupPath, $sites);
+            }
             if ($site !== null) {
                 return 'SITE:'.$site->domain;
+            }
+
+            $domainFromPath = $this->extractDomainFromBackupPath($backupPath);
+            if ($domainFromPath !== null) {
+                return 'SITE:'.$domainFromPath.' (path)';
+            }
+
+            if ($sites->count() === 1) {
+                /** @var Site $onlySite */
+                $onlySite = $sites->first();
+
+                return 'SITE:'.$onlySite->domain.' (?)';
             }
 
             return 'SITE:unknown';
@@ -255,6 +279,13 @@ class GenerateBackupDownloadLink extends Action
         $site = $this->matchSiteByDatabaseName($databaseName, $sites);
         if ($site !== null) {
             return 'SITE:'.$site->domain;
+        }
+
+        if ($sites->count() === 1) {
+            /** @var Site $onlySite */
+            $onlySite = $sites->first();
+
+            return 'SITE:'.$onlySite->domain.' (?)';
         }
 
         return 'SITE:unknown';
@@ -268,17 +299,19 @@ class GenerateBackupDownloadLink extends Action
         }
 
         /** @var ?Site $site */
-        $site = $sites
-            ->filter(function (Site $site) use ($normalizedPath): bool {
-                $sitePath = rtrim((string) $site->path, '/');
-                if ($sitePath === '') {
-                    return false;
+        $site = $sites->first(function (Site $site) use ($normalizedPath): bool {
+            foreach ($this->sitePathCandidates($site) as $candidate) {
+                if ($candidate === '' || $candidate === '/') {
+                    continue;
                 }
 
-                return $normalizedPath === $sitePath || str_starts_with($normalizedPath, $sitePath.'/');
-            })
-            ->sortByDesc(fn (Site $site): int => strlen((string) $site->path))
-            ->first();
+                if ($normalizedPath === $candidate || str_starts_with($normalizedPath, $candidate.'/')) {
+                    return true;
+                }
+            }
+
+            return false;
+        });
 
         return $site;
     }
@@ -293,12 +326,93 @@ class GenerateBackupDownloadLink extends Action
         /** @var ?Site $site */
         $site = $sites->first(function (Site $site) use ($databaseName): bool {
             $typeData = is_array($site->type_data ?? null) ? $site->type_data : [];
-            $siteDatabaseName = (string) ($typeData['database'] ?? '');
 
-            return $siteDatabaseName !== '' && $siteDatabaseName === $databaseName;
+            $candidates = [
+                (string) ($typeData['database'] ?? ''),
+                (string) ($typeData['db'] ?? ''),
+                (string) ($typeData['db_name'] ?? ''),
+                (string) ($typeData['database_name'] ?? ''),
+                (string) ($typeData['dbName'] ?? ''),
+                (string) ($typeData['DB_DATABASE'] ?? ''),
+            ];
+
+            foreach ($candidates as $candidate) {
+                $candidate = trim($candidate);
+                if ($candidate !== '' && strcasecmp($candidate, $databaseName) === 0) {
+                    return true;
+                }
+            }
+
+            return false;
         });
 
         return $site;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function sitePathCandidates(Site $site): array
+    {
+        $sitePath = rtrim(trim((string) $site->path), '/');
+        if ($sitePath === '') {
+            return [];
+        }
+
+        $candidates = [$sitePath];
+
+        $parent = rtrim((string) dirname($sitePath), '/');
+        if ($parent !== '' && $parent !== '.' && $parent !== '/') {
+            $candidates[] = $parent;
+        }
+
+        $grandParent = rtrim((string) dirname($parent), '/');
+        if ($grandParent !== '' && $grandParent !== '.' && $grandParent !== '/') {
+            $candidates[] = $grandParent;
+        }
+
+        if (str_ends_with($sitePath, '/public')) {
+            $withoutPublic = substr($sitePath, 0, -strlen('/public'));
+            $withoutPublic = rtrim((string) $withoutPublic, '/');
+            if ($withoutPublic !== '' && $withoutPublic !== '/') {
+                $candidates[] = $withoutPublic;
+            }
+        }
+
+        $candidates = array_values(array_unique(array_filter($candidates)));
+        usort($candidates, static fn (string $a, string $b): int => strlen($b) <=> strlen($a));
+
+        return $candidates;
+    }
+
+    private function matchSiteByDomainInPath(string $backupPath, Collection $sites): ?Site
+    {
+        $domain = $this->extractDomainFromBackupPath($backupPath);
+        if ($domain === null) {
+            return null;
+        }
+
+        /** @var ?Site $site */
+        $site = $sites->first(fn (Site $site): bool => strcasecmp((string) $site->domain, $domain) === 0);
+
+        return $site;
+    }
+
+    private function extractDomainFromBackupPath(string $backupPath): ?string
+    {
+        $trimmed = trim($backupPath, '/');
+        if ($trimmed === '') {
+            return null;
+        }
+
+        $parts = explode('/', $trimmed);
+        if (count($parts) >= 3 && $parts[0] === 'home') {
+            $candidate = trim((string) $parts[2]);
+
+            return $candidate !== '' ? $candidate : null;
+        }
+
+        return null;
     }
 
     private function extractBackupFileId(string $selectedBackup): ?int

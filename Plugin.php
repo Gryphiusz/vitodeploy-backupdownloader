@@ -6,6 +6,7 @@ use App\Plugins\AbstractPlugin;
 use App\Plugins\RegisterServerFeature;
 use App\Plugins\RegisterServerFeatureAction;
 use App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Actions\GenerateBackupDownloadLink;
+use App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Http\Controllers\BackupBrowserController;
 use App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Http\Controllers\DownloadBackupController;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Log;
@@ -26,13 +27,17 @@ class Plugin extends AbstractPlugin
             ->register();
 
         RegisterServerFeatureAction::make('backup-downloader', 'generate-link')
-            ->label('Generate Link')
+            ->label('Backup Browser')
             ->handler(GenerateBackupDownloadLink::class)
             ->register();
 
         Route::middleware(['web', 'auth', 'has-project'])
             ->get('/plugins/backup-downloader/download/{token}', DownloadBackupController::class)
             ->name('plugins.backup-downloader.download');
+
+        Route::middleware(['web', 'auth', 'has-project'])
+            ->get('/plugins/backup-downloader/servers/{server}/backups', BackupBrowserController::class)
+            ->name('plugins.backup-downloader.backups');
     }
 
     public function install(): void
