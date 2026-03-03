@@ -8,28 +8,23 @@ class BackupFilesMenuPatchService
 {
     private const SOURCE_TARGET_FILE = 'resources/js/pages/backups/components/file-columns.tsx';
     private const BUILD_MANIFEST_FILE = 'public/build/manifest.json';
-    private const ROUTE_MARKER = "plugins.backup-downloader.direct-download";
+    private const LEGACY_ROUTE_MARKER = "plugins.backup-downloader.direct-download";
+    private const SOURCE_URL_MARKER = '/plugins/backup-downloader/servers/${row.original.server_id}/backups/${row.original.backup_id}/files/${row.original.id}/download';
+    private const BUILD_URL_MARKER = '/plugins/backup-downloader/servers/"+';
     private const INSERT_AFTER = "<DropdownMenuItem onSelect={(e) => e.preventDefault()}>Restore</DropdownMenuItem>\n              </RestoreBackup>";
     private const DELETE_LINE = '              <Delete file={row.original} />';
 
     public function apply(): void
     {
         $patchedSource = $this->patchSourceFile();
-        $patchedBuilt = $this->patchBuiltFile();
+        $patchedBuilt = $this->patchBuiltFiles();
 
         if ($patchedSource || $patchedBuilt) {
             Log::info('Backup Downloader plugin patched backups file menu with Download action.', [
                 'source_target' => self::SOURCE_TARGET_FILE,
                 'build_manifest' => self::BUILD_MANIFEST_FILE,
             ]);
-            return;
         }
-
-        Log::warning('Backup Downloader plugin could not patch backups file menu.', [
-            'source_target' => self::SOURCE_TARGET_FILE,
-            'build_manifest' => self::BUILD_MANIFEST_FILE,
-            'note' => 'If this is a custom Vito build, menu component paths may have changed.',
-        ]);
     }
 
     private function patchSourceFile(): bool
@@ -44,18 +39,28 @@ class BackupFilesMenuPatchService
             return false;
         }
 
-        if (str_contains($content, self::ROUTE_MARKER)) {
-            return true;
+        if (str_contains($content, self::SOURCE_URL_MARKER)) {
+            return false;
+        }
+
+        if (str_contains($content, self::LEGACY_ROUTE_MARKER)) {
+            $updatedContent = preg_replace(
+                "/href=\\{route\\('plugins\\.backup-downloader\\.direct-download',\\s*\\{\\s*server:\\s*row\\.original\\.server_id,\\s*backup:\\s*row\\.original\\.backup_id,\\s*backupFile:\\s*row\\.original\\.id,\\s*\\}\\)\\}/m",
+                'href={`/plugins/backup-downloader/servers/${row.original.server_id}/backups/${row.original.backup_id}/files/${row.original.id}/download`}',
+                $content,
+                1,
+                $count
+            );
+
+            if (is_string($updatedContent) && $count > 0) {
+                return $this->writeFile($targetPath, $updatedContent);
+            }
         }
 
         $downloadMenuItem = <<<'TSX'
               <DropdownMenuItem asChild>
                 <a
-                  href={route('plugins.backup-downloader.direct-download', {
-                    server: row.original.server_id,
-                    backup: row.original.backup_id,
-                    backupFile: row.original.id,
-                  })}
+                  href={`/plugins/backup-downloader/servers/${row.original.server_id}/backups/${row.original.backup_id}/files/${row.original.id}/download`}
                 >
                   Download
                 </a>
@@ -87,7 +92,7 @@ TSX;
         return $this->writeFile($targetPath, $content);
     }
 
-    private function patchBuiltFile(): bool
+    private function patchBuiltFiles(): bool
     {
         $manifestPath = base_path(self::BUILD_MANIFEST_FILE);
         $candidateChunks = [];
@@ -113,50 +118,73 @@ TSX;
             return false;
         }
 
+        $patchedAny = false;
+
         foreach ($candidateChunks as $chunkPath) {
-            if (! is_file($chunkPath)) {
-                continue;
+            if ($this->patchBuiltChunk((string) $chunkPath)) {
+                $patchedAny = true;
             }
-
-            $content = file_get_contents($chunkPath);
-            if (! is_string($content) || $content === '') {
-                continue;
-            }
-
-            if (! str_contains($content, 'backup-files.destroy') || ! str_contains($content, 'children:"Restore"')) {
-                continue;
-            }
-
-            if (str_contains($content, self::ROUTE_MARKER)) {
-                return true;
-            }
-
-            $itemAliasMatch = [];
-            $itemAliasPattern = '/import\{[^}]*c as (?<alias>[A-Za-z_\$][A-Za-z0-9_\$]*)\}from"\.\/dropdown-menu-[^"]+\.js";/';
-            if (preg_match($itemAliasPattern, $content, $itemAliasMatch) !== 1) {
-                continue;
-            }
-            $menuItemAlias = $itemAliasMatch['alias'];
-
-            $deleteCallMatch = [];
-            $deleteCallPattern = '/,e\.jsx\((?<delete>[A-Za-z_\$][A-Za-z0-9_\$]*),\{file:(?<row>[A-Za-z_\$][A-Za-z0-9_\$]*)\.original\}\)/';
-            if (preg_match($deleteCallPattern, $content, $deleteCallMatch) !== 1) {
-                continue;
-            }
-            $deleteCall = $deleteCallMatch[0];
-            $rowAlias = $deleteCallMatch['row'];
-
-            $downloadCall = ',e.jsx('.$menuItemAlias.',{asChild:!0,children:e.jsx("a",{href:route("plugins.backup-downloader.direct-download",{server:'.$rowAlias.'.original.server_id,backup:'.$rowAlias.'.original.backup_id,backupFile:'.$rowAlias.'.original.id}),children:"Download"})})';
-            $updatedContent = preg_replace('/'.preg_quote($deleteCall, '/').'/', $downloadCall.$deleteCall, $content, 1, $count);
-
-            if (! is_string($updatedContent) || $count < 1) {
-                continue;
-            }
-
-            return $this->writeFile($chunkPath, $updatedContent);
         }
 
-        return false;
+        return $patchedAny;
+    }
+
+    private function patchBuiltChunk(string $chunkPath): bool
+    {
+        if (! is_file($chunkPath)) {
+            return false;
+        }
+
+        $content = file_get_contents($chunkPath);
+        if (! is_string($content) || $content === '') {
+            return false;
+        }
+
+        if (! str_contains($content, 'backup-files.destroy') || ! str_contains($content, 'children:"Restore"')) {
+            return false;
+        }
+
+        if (str_contains($content, self::BUILD_URL_MARKER)) {
+            return false;
+        }
+
+        if (str_contains($content, self::LEGACY_ROUTE_MARKER)) {
+            $updatedLegacy = preg_replace_callback(
+                '/route\("plugins\.backup-downloader\.direct-download",\{server:(?<row>[A-Za-z_\$][A-Za-z0-9_\$]*)\.original\.server_id,backup:\k<row>\.original\.backup_id,backupFile:\k<row>\.original\.id\}\)/',
+                static fn (array $matches): string => '"/plugins/backup-downloader/servers/"+'.$matches['row'].'.original.server_id+"/backups/"+'.$matches['row'].'.original.backup_id+"/files/"+'.$matches['row'].'.original.id+"/download"',
+                $content,
+                1,
+                $count
+            );
+
+            if (is_string($updatedLegacy) && $count > 0) {
+                return $this->writeFile($chunkPath, $updatedLegacy);
+            }
+        }
+
+        $itemAliasMatch = [];
+        $itemAliasPattern = '/import\{[^}]*c as (?<alias>[A-Za-z_\$][A-Za-z0-9_\$]*)\}from"\.\/dropdown-menu-[^"]+\.js";/';
+        if (preg_match($itemAliasPattern, $content, $itemAliasMatch) !== 1) {
+            return false;
+        }
+        $menuItemAlias = $itemAliasMatch['alias'];
+
+        $deleteCallMatch = [];
+        $deleteCallPattern = '/,e\.jsx\((?<delete>[A-Za-z_\$][A-Za-z0-9_\$]*),\{file:(?<row>[A-Za-z_\$][A-Za-z0-9_\$]*)\.original\}\)/';
+        if (preg_match($deleteCallPattern, $content, $deleteCallMatch) !== 1) {
+            return false;
+        }
+        $deleteCall = $deleteCallMatch[0];
+        $rowAlias = $deleteCallMatch['row'];
+
+        $downloadCall = ',e.jsx('.$menuItemAlias.',{asChild:!0,children:e.jsx("a",{href:"/plugins/backup-downloader/servers/"+'.$rowAlias.'.original.server_id+"/backups/"+'.$rowAlias.'.original.backup_id+"/files/"+'.$rowAlias.'.original.id+"/download",children:"Download"})})';
+        $updatedContent = preg_replace('/'.preg_quote($deleteCall, '/').'/', $downloadCall.$deleteCall, $content, 1, $count);
+
+        if (! is_string($updatedContent) || $count < 1) {
+            return false;
+        }
+
+        return $this->writeFile($chunkPath, $updatedContent);
     }
 
     private function writeFile(string $path, string $content): bool
