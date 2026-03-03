@@ -12,6 +12,7 @@ use App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Models\BackupDownloadL
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 
@@ -28,6 +29,26 @@ class GenerateBackupDownloadLink extends Action
     }
 
     public function form(): ?DynamicForm
+    {
+        try {
+            return $this->buildForm();
+        } catch (\Throwable $exception) {
+            Log::warning('Backup Downloader form rendering failed', [
+                'server_id' => $this->server->id,
+                'error' => $exception->getMessage(),
+            ]);
+
+            return DynamicForm::make([
+                DynamicField::make('backup_downloader_form_error')
+                    ->alert()
+                    ->options(['type' => 'warning'])
+                    ->label('Backup Downloader Temporary Issue')
+                    ->description('Could not render backup list safely. Please refresh, or check plugin logs for details.'),
+            ]);
+        }
+    }
+
+    private function buildForm(): DynamicForm
     {
         $sites = $this->serverSites();
 
@@ -219,9 +240,16 @@ class GenerateBackupDownloadLink extends Action
      */
     private function serverSites(): Collection
     {
-        return Site::query()
-            ->where('server_id', $this->server->id)
-            ->get(['id', 'domain', 'path', 'type_data']);
+        try {
+            return Site::query()
+                ->where('server_id', $this->server->id)
+                ->get(['id', 'domain', 'path', 'type_data']);
+        } catch (\Throwable) {
+            // Fallback for legacy/invalid site type_data payloads.
+            return Site::query()
+                ->where('server_id', $this->server->id)
+                ->get(['id', 'domain', 'path']);
+        }
     }
 
     private function backupFileLabel(BackupFile $file, Collection $sites): string
@@ -305,7 +333,7 @@ class GenerateBackupDownloadLink extends Action
                     continue;
                 }
 
-                if ($normalizedPath === $candidate || str_starts_with($normalizedPath, $candidate.'/')) {
+                if ($normalizedPath === $candidate || Str::startsWith($normalizedPath, $candidate.'/')) {
                     return true;
                 }
             }
@@ -371,7 +399,7 @@ class GenerateBackupDownloadLink extends Action
             $candidates[] = $grandParent;
         }
 
-        if (str_ends_with($sitePath, '/public')) {
+        if (Str::endsWith($sitePath, '/public')) {
             $withoutPublic = substr($sitePath, 0, -strlen('/public'));
             $withoutPublic = rtrim((string) $withoutPublic, '/');
             if ($withoutPublic !== '' && $withoutPublic !== '/') {
