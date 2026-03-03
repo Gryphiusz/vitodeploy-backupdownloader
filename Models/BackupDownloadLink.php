@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Vito\Plugins\Arnobolt\BackupDownloader\Models;
+namespace App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Models;
 
 use App\Models\BackupFile;
 use Illuminate\Database\Eloquent\Model;

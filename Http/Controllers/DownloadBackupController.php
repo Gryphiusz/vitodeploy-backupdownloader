@@ -1,10 +1,10 @@
 <?php
 
-namespace App\Vito\Plugins\Arnobolt\BackupDownloader\Http\Controllers;
+namespace App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Http\Controllers;
 
 use App\Http\Controllers\Controller;
-use App\Vito\Plugins\Arnobolt\BackupDownloader\Models\BackupDownloadLink;
-use App\Vito\Plugins\Arnobolt\BackupDownloader\Services\BackupDownloadService;
+use App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Models\BackupDownloadLink;
+use App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Services\BackupDownloadService;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 

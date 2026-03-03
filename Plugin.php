@@ -1,12 +1,12 @@
 <?php
 
-namespace App\Vito\Plugins\Arnobolt\BackupDownloader;
+namespace App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader;
 
 use App\Plugins\AbstractPlugin;
 use App\Plugins\RegisterServerFeature;
 use App\Plugins\RegisterServerFeatureAction;
-use App\Vito\Plugins\Arnobolt\BackupDownloader\Actions\GenerateBackupDownloadLink;
-use App\Vito\Plugins\Arnobolt\BackupDownloader\Http\Controllers\DownloadBackupController;
+use App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Actions\GenerateBackupDownloadLink;
+use App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Http\Controllers\DownloadBackupController;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Route;

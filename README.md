@@ -13,7 +13,7 @@ Adds a VitoDeploy server feature to generate temporary, single-use links for dow
 
 Place this plugin at:
 
-`app/Vito/Plugins/Arnobolt/BackupDownloader`
+`app/Vito/Plugins/Gryphiusz/VitodeployBackupdownloader`
 
 Then in Vito UI:
 

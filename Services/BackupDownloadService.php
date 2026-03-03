@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Vito\Plugins\Arnobolt\BackupDownloader\Services;
+namespace App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Services;
 
 use App\Models\BackupFile;
 use Illuminate\Support\Facades\Log;

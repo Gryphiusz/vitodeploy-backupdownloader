@@ -1,13 +1,13 @@
 <?php
 
-namespace App\Vito\Plugins\Arnobolt\BackupDownloader\Actions;
+namespace App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Actions;
 
 use App\DTOs\DynamicField;
 use App\DTOs\DynamicForm;
 use App\Enums\BackupFileStatus;
 use App\Models\BackupFile;
 use App\ServerFeatures\Action;
-use App\Vito\Plugins\Arnobolt\BackupDownloader\Models\BackupDownloadLink;
+use App\Vito\Plugins\Gryphiusz\VitodeployBackupdownloader\Models\BackupDownloadLink;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
