@@ -34,5 +34,5 @@ Then in Vito UI:
 
 - Links are single-use and user-scoped.
 - If Vito is updated and overwrites the core file, this plugin patches it again on next boot.
-- If your installation uses prebuilt frontend assets, run `npm run build` after update/patch.
+- No frontend build is required: plugin patches both source file and prebuilt `public/build` chunk when possible.
 - Plugin data is stored in `backup_downloader_links`.
