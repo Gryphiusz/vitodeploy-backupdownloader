@@ -87,31 +87,48 @@ class GenerateBackupDownloadLink extends Action
             ->options(['type' => 'info'])
             ->description('Select site, backup type, and backup file below, then submit once to generate the link.');
 
-        $activeLink = $this->activeLink();
-        if ($activeLink !== null) {
-            $activeLinkDescription = sprintf(
-                'Backup file #%d. Expires at %s.',
-                $activeLink->backup_file_id,
-                $activeLink->expires_at->toDateTimeString()
+        $latestLink = $this->latestLink();
+        if ($latestLink !== null) {
+            $latestLinkDescription = sprintf(
+                'Backup file #%d.',
+                $latestLink->backup_file_id
             );
 
-            if ($activeLink->backupFile !== null) {
-                $activeLinkDescription = sprintf(
+            if ($latestLink->backupFile !== null) {
+                $latestLinkDescription = $this->backupFileLabel($latestLink->backupFile, $sites);
+            }
+
+            if ($latestLink->isUsed()) {
+                $latestLinkDescription = sprintf(
+                    '%s. Already downloaded at %s. This one-time link is no longer valid.',
+                    $latestLinkDescription,
+                    $latestLink->used_at?->toDateTimeString() ?? '-'
+                );
+            } elseif ($latestLink->isExpired()) {
+                $latestLinkDescription = sprintf(
+                    '%s. Expired at %s. This one-time link is no longer valid.',
+                    $latestLinkDescription,
+                    $latestLink->expires_at->toDateTimeString()
+                );
+            } else {
+                $latestLinkDescription = sprintf(
                     '%s. Expires at %s.',
-                    $this->backupFileLabel($activeLink->backupFile, $sites),
-                    $activeLink->expires_at->toDateTimeString()
+                    $latestLinkDescription,
+                    $latestLink->expires_at->toDateTimeString()
                 );
             }
 
-            $fields[] = DynamicField::make('backup_downloader_active_link')
+            $fields[] = DynamicField::make('backup_downloader_latest_link')
                 ->alert()
                 ->label('Latest Generated Link')
-                ->description($activeLinkDescription);
+                ->description($latestLinkDescription);
 
-            $fields[count($fields) - 1]->link(
-                'Download Backup',
-                $this->downloadUrl($activeLink->token)
-            );
+            if (! $latestLink->isUsed() && ! $latestLink->isExpired()) {
+                $fields[count($fields) - 1]->link(
+                    'Download Backup',
+                    $this->downloadUrl($latestLink->token)
+                );
+            }
         }
 
         if ($allFiles->isEmpty()) {
@@ -182,14 +199,6 @@ class GenerateBackupDownloadLink extends Action
         $selectedType = (string) $request->input('backup_type', '');
 
         $selection = $this->selectionState();
-        if (($selection['site'] ?? null) === null || ($selection['type'] ?? null) === null) {
-            $this->putSelectionState($request, $selectedSite, $selectedType);
-            $selection = [
-                'site' => $selectedSite,
-                'type' => $selectedType,
-            ];
-        }
-
         $selectionChanged = ($selection['site'] ?? null) !== $selectedSite
             || ($selection['type'] ?? null) !== $selectedType;
         if ($selectionChanged) {
@@ -297,7 +306,7 @@ class GenerateBackupDownloadLink extends Action
         return $siteOptions;
     }
 
-    private function activeLink(): ?BackupDownloadLink
+    private function latestLink(): ?BackupDownloadLink
     {
         $userId = Auth::id();
         if ($userId === null) {
@@ -307,8 +316,6 @@ class GenerateBackupDownloadLink extends Action
         return BackupDownloadLink::query()
             ->where('user_id', $userId)
             ->where('server_id', $this->server->id)
-            ->whereNull('used_at')
-            ->where('expires_at', '>', now())
             ->whereHas('backupFile.backup')
             ->with(['backupFile.backup.database'])
             ->latest('id')

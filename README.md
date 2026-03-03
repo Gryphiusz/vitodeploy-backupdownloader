@@ -28,7 +28,7 @@ Then in Vito UI:
 2. Go to `Features > Backup Downloader`
 3. Run `Backup Browser`
 4. Use `Open Backups Page` to inspect backups in Vito's original backups UI
-5. In the action modal select site and backup type (backup file list is filtered by these selections)
+5. In the action modal select site and backup type, then submit once if you changed them (this refreshes the filtered backup-file list)
 6. Select backup file (`ID | source(path/db) | created_at`) and expiration
 7. Submit to generate the download link (URL is shown in the success message)
 
