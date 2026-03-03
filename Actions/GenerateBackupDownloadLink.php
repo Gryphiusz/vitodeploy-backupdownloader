@@ -15,6 +15,7 @@ use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 
@@ -60,21 +61,29 @@ class GenerateBackupDownloadLink extends Action
     private function buildForm(): DynamicForm
     {
         $sites = $this->serverSites();
+        $allFiles = $this->recentAvailableBackupFiles();
+        $wizard = $this->wizardState();
+        $selectedSite = $wizard['site'] ?? null;
+        $selectedType = $wizard['type'] ?? null;
 
-        $fields = [
-            DynamicField::make('backup_downloader_open_backups_page')
-                ->alert()
-                ->label('Open Server Backups')
-                ->description('View all backups using Vito\'s built-in backups page, then come back here to generate a download link.')
-                ->link(
-                    'Open Backups Page',
-                    route('plugins.backup-downloader.backups', ['server' => $this->server->id])
-                ),
-            DynamicField::make('backup_downloader_info')
-                ->alert()
-                ->options(['type' => 'info'])
-                ->description($this->backupSummaryText($sites)),
-        ];
+        $openBackupsField = DynamicField::make('backup_downloader_open_backups_page')
+            ->alert()
+            ->label('Open Server Backups')
+            ->description('View all backups in Vito\'s built-in backups page. Then come back here to generate the download link.');
+
+        if (Route::has('plugins.backup-downloader.backups')) {
+            $openBackupsField->link(
+                'Open Backups Page',
+                route('plugins.backup-downloader.backups', ['server' => $this->server->id])
+            );
+        }
+
+        $fields = [$openBackupsField];
+
+        $fields[] = DynamicField::make('backup_downloader_wizard_state')
+            ->alert()
+            ->options(['type' => 'info'])
+            ->description($this->wizardStatusText($selectedSite, $selectedType));
 
         $activeLink = $this->activeLink();
         if ($activeLink !== null) {
@@ -95,15 +104,17 @@ class GenerateBackupDownloadLink extends Action
             $fields[] = DynamicField::make('backup_downloader_active_link')
                 ->alert()
                 ->label('Latest Generated Link')
-                ->description($activeLinkDescription)
-                ->link(
+                ->description($activeLinkDescription);
+
+            if (Route::has('plugins.backup-downloader.download')) {
+                $fields[count($fields) - 1]->link(
                     'Download Backup',
                     route('plugins.backup-downloader.download', ['token' => $activeLink->token])
                 );
+            }
         }
 
-        $options = $this->backupFileOptions($sites);
-        if ($options === []) {
+        if ($allFiles->isEmpty()) {
             $fields[] = DynamicField::make('backup_downloader_empty')
                 ->alert()
                 ->options(['type' => 'warning'])
@@ -112,9 +123,61 @@ class GenerateBackupDownloadLink extends Action
             return DynamicForm::make($fields);
         }
 
+        if ($selectedSite === null) {
+            $siteOptions = $this->siteOptionsFromBackups($sites, $allFiles);
+            $fields[] = DynamicField::make('site_key')
+                ->select()
+                ->label('Step 1: Select Site')
+                ->options($siteOptions)
+                ->default($siteOptions[0] ?? null)
+                ->description('Submit to continue to Step 2.');
+
+            return DynamicForm::make($fields);
+        }
+
+        if ($selectedType === null) {
+            $fields[] = DynamicField::make('backup_downloader_selected_site')
+                ->alert()
+                ->label('Selected Site')
+                ->description($selectedSite);
+
+            $fields[] = DynamicField::make('backup_type')
+                ->select()
+                ->label('Step 2: Select Backup Type')
+                ->options(['file', 'database'])
+                ->default('file')
+                ->description('Submit to continue to Step 3.');
+
+            $fields[] = DynamicField::make('start_over')
+                ->checkbox()
+                ->label('Start Over')
+                ->default(false);
+
+            return DynamicForm::make($fields);
+        }
+
+        $fields[] = DynamicField::make('backup_downloader_selected_site_type')
+            ->alert()
+            ->label('Current Selection')
+            ->description(sprintf('site=%s | type=%s', $selectedSite, strtoupper($selectedType)));
+
+        $options = $this->backupFileOptions($sites, $allFiles, $selectedSite, $selectedType);
+        if ($options === []) {
+            $fields[] = DynamicField::make('backup_downloader_filtered_empty')
+                ->alert()
+                ->options(['type' => 'warning'])
+                ->description('No backup files match this site/type. Tick "Start Over" and submit.');
+            $fields[] = DynamicField::make('start_over')
+                ->checkbox()
+                ->label('Start Over')
+                ->default(false);
+
+            return DynamicForm::make($fields);
+        }
+
         $fields[] = DynamicField::make('backup_file')
             ->select()
-            ->label('Backup')
+            ->label('Step 3: Select Backup File')
             ->options($options)
             ->default($options[0])
             ->description('Format: ID | type | source | site | created_at');
@@ -126,6 +189,11 @@ class GenerateBackupDownloadLink extends Action
             ->default('15')
             ->description('The link is single-use and expires automatically.');
 
+        $fields[] = DynamicField::make('start_over')
+            ->checkbox()
+            ->label('Start Over')
+            ->default(false);
+
         return DynamicForm::make($fields);
     }
 
@@ -134,9 +202,59 @@ class GenerateBackupDownloadLink extends Action
         Validator::make($request->all(), [
             'backup_file' => ['nullable', 'string', 'max:1000'],
             'backup_file_id' => ['nullable', 'integer'],
-            'expiration_minutes' => ['required', 'integer', 'in:5,15,30,60'],
+            'site_key' => ['nullable', 'string', 'max:255'],
+            'backup_type' => ['nullable', 'in:file,database'],
+            'start_over' => ['nullable'],
+            'expiration_minutes' => ['nullable', 'integer', 'in:5,15,30,60'],
         ])->validate();
 
+        if (filter_var($request->input('start_over', false), FILTER_VALIDATE_BOOL)) {
+            $this->clearWizardState($request);
+            $request->session()->flash('info', 'Backup selection wizard reset.');
+
+            return;
+        }
+
+        $sites = $this->serverSites();
+        $allFiles = $this->recentAvailableBackupFiles();
+        if ($allFiles->isEmpty()) {
+            abort(422, 'No downloadable backup files found yet.');
+        }
+
+        $wizard = $this->wizardState();
+        $selectedSite = $wizard['site'] ?? null;
+        $selectedType = $wizard['type'] ?? null;
+
+        // Step 1: site
+        if ($selectedSite === null) {
+            $siteKey = trim((string) $request->input('site_key', ''));
+            if ($siteKey === '') {
+                abort(422, 'Please select a site.');
+            }
+
+            $this->putWizardState($request, $siteKey, null);
+            $request->session()->flash('info', "Step 1 complete: site '{$siteKey}' selected. Choose backup type next.");
+
+            return;
+        }
+
+        // Step 2: type
+        if ($selectedType === null) {
+            $backupType = (string) $request->input('backup_type', '');
+            if (! in_array($backupType, ['file', 'database'], true)) {
+                abort(422, 'Please select a backup type.');
+            }
+
+            $this->putWizardState($request, $selectedSite, $backupType);
+            $request->session()->flash('info', sprintf(
+                'Step 2 complete: %s backups selected. Choose backup file next.',
+                strtoupper($backupType)
+            ));
+
+            return;
+        }
+
+        // Step 3: backup file
         $backupFileId = $this->extractBackupFileId((string) $request->input('backup_file', ''));
         if ($backupFileId === null && $request->filled('backup_file_id')) {
             $backupFileId = (int) $request->input('backup_file_id');
@@ -146,15 +264,24 @@ class GenerateBackupDownloadLink extends Action
         }
 
         $backupFile = BackupFile::query()
-            ->with(['backup'])
+            ->with(['backup.database'])
             ->findOrFail($backupFileId);
 
-        if ((int) $backupFile->backup->server_id !== (int) $this->server->id) {
+        if ($backupFile->backup === null || (int) $backupFile->backup->server_id !== (int) $this->server->id) {
             abort(422, 'Selected backup file does not belong to this server.');
         }
 
         if (! $backupFile->isAvailable()) {
             abort(422, 'Selected backup file is not available for download yet.');
+        }
+
+        if ((string) $backupFile->backup->type->value !== $selectedType) {
+            abort(422, 'Selected backup file does not match the selected backup type.');
+        }
+
+        $resolvedSiteKey = $this->siteKeyForBackupFile($backupFile, $sites);
+        if ($resolvedSiteKey !== $selectedSite) {
+            abort(422, 'Selected backup file does not match the selected site.');
         }
 
         $userId = Auth::id();
@@ -172,39 +299,78 @@ class GenerateBackupDownloadLink extends Action
             'expires_at' => now()->addMinutes($minutes),
         ]);
 
-        $url = route('plugins.backup-downloader.download', ['token' => $link->token]);
-        $request->session()->flash(
-            'success',
-            sprintf(
-                'Download link generated for backup file #%d (expires %s): %s',
-                $backupFile->id,
-                $link->expires_at->toDateTimeString(),
-                $url
-            )
-        );
+        if (Route::has('plugins.backup-downloader.download')) {
+            $url = route('plugins.backup-downloader.download', ['token' => $link->token]);
+            $request->session()->flash(
+                'success',
+                sprintf(
+                    'Download link generated for backup file #%d (expires %s): %s',
+                    $backupFile->id,
+                    $link->expires_at->toDateTimeString(),
+                    $url
+                )
+            );
+        } else {
+            $request->session()->flash(
+                'success',
+                sprintf('Download token generated for backup file #%d (expires %s).', $backupFile->id, $link->expires_at->toDateTimeString())
+            );
+        }
     }
 
     /**
      * @return array<int, string>
      */
-    private function backupFileOptions(Collection $sites): array
+    private function backupFileOptions(Collection $sites, Collection $allFiles, string $selectedSite, string $selectedType): array
     {
-        return $this->recentAvailableBackupFiles()
+        return $allFiles
+            ->filter(function (BackupFile $file) use ($sites, $selectedSite, $selectedType): bool {
+                if ($file->backup === null) {
+                    return false;
+                }
+
+                if ((string) $file->backup->type->value !== $selectedType) {
+                    return false;
+                }
+
+                return $this->siteKeyForBackupFile($file, $sites) === $selectedSite;
+            })
             ->map(fn (BackupFile $file): string => $this->backupFileLabel($file, $sites))
             ->values()
             ->all();
     }
 
-    private function backupSummaryText(Collection $sites): string
+    /**
+     * @return array<int, string>
+     */
+    private function siteOptionsFromBackups(Collection $sites, Collection $allFiles): array
     {
-        $files = $this->recentAvailableBackupFiles();
-        if ($files->isEmpty()) {
-            return 'No backup files found for this server.';
+        $siteOptions = $allFiles
+            ->map(fn (BackupFile $file): string => $this->siteKeyForBackupFile($file, $sites))
+            ->unique()
+            ->values()
+            ->all();
+
+        sort($siteOptions);
+
+        if ($siteOptions === []) {
+            return ['unknown'];
         }
 
-        return "Available backups (ID | type | source | site | created_at):\n".$files
-            ->map(fn (BackupFile $file): string => $this->backupFileLabel($file, $sites))
-            ->implode("\n");
+        return $siteOptions;
+    }
+
+    private function wizardStatusText(?string $selectedSite, ?string $selectedType): string
+    {
+        if ($selectedSite === null) {
+            return 'Wizard step 1/3: select site and submit.';
+        }
+
+        if ($selectedType === null) {
+            return sprintf('Wizard step 2/3: site=%s selected. Choose backup type and submit.', $selectedSite);
+        }
+
+        return sprintf('Wizard step 3/3: site=%s and type=%s selected. Choose backup file and generate link.', $selectedSite, strtoupper($selectedType));
     }
 
     private function activeLink(): ?BackupDownloadLink
@@ -292,8 +458,17 @@ class GenerateBackupDownloadLink extends Action
 
     private function backupSiteLabel(BackupFile $file, Collection $sites): string
     {
+        $siteKey = $this->siteKeyForBackupFile($file, $sites);
+
+        return $siteKey === 'unknown'
+            ? 'SITE:unknown'
+            : 'SITE:'.$siteKey;
+    }
+
+    private function siteKeyForBackupFile(BackupFile $file, Collection $sites): string
+    {
         if ($file->backup === null) {
-            return 'SITE:unknown';
+            return 'unknown';
         }
 
         if ($file->backup->type->value === 'file') {
@@ -303,38 +478,38 @@ class GenerateBackupDownloadLink extends Action
                 $site = $this->matchSiteByDomainInPath($backupPath, $sites);
             }
             if ($site !== null) {
-                return 'SITE:'.$site->domain;
+                return Str::lower((string) $site->domain);
             }
 
             $domainFromPath = $this->extractDomainFromBackupPath($backupPath);
             if ($domainFromPath !== null) {
-                return 'SITE:'.$domainFromPath.' (path)';
+                return Str::lower($domainFromPath);
             }
 
             if ($sites->count() === 1) {
                 /** @var Site $onlySite */
                 $onlySite = $sites->first();
 
-                return 'SITE:'.$onlySite->domain.' (?)';
+                return Str::lower((string) $onlySite->domain);
             }
 
-            return 'SITE:unknown';
+            return 'unknown';
         }
 
         $databaseName = (string) ($file->backup->database?->name ?? '');
         $site = $this->matchSiteByDatabaseName($databaseName, $sites);
         if ($site !== null) {
-            return 'SITE:'.$site->domain;
+            return Str::lower((string) $site->domain);
         }
 
         if ($sites->count() === 1) {
             /** @var Site $onlySite */
             $onlySite = $sites->first();
 
-            return 'SITE:'.$onlySite->domain.' (?)';
+            return Str::lower((string) $onlySite->domain);
         }
 
-        return 'SITE:unknown';
+        return 'unknown';
     }
 
     private function matchSiteByPath(string $path, Collection $sites): ?Site
@@ -459,6 +634,53 @@ class GenerateBackupDownloadLink extends Action
         }
 
         return null;
+    }
+
+    /**
+     * @return array{site:?string,type:?string}
+     */
+    private function wizardState(): array
+    {
+        try {
+            $state = request()->session()->get($this->wizardStateKey(), []);
+        } catch (\Throwable) {
+            $state = [];
+        }
+
+        if (! is_array($state)) {
+            $state = [];
+        }
+
+        $site = isset($state['site']) ? trim((string) $state['site']) : null;
+        $type = isset($state['type']) ? trim((string) $state['type']) : null;
+        if (! in_array($type, ['file', 'database'], true)) {
+            $type = null;
+        }
+
+        return [
+            'site' => $site !== '' ? $site : null,
+            'type' => $type,
+        ];
+    }
+
+    private function putWizardState(Request $request, ?string $site, ?string $type): void
+    {
+        $request->session()->put($this->wizardStateKey(), [
+            'site' => $site,
+            'type' => $type,
+        ]);
+    }
+
+    private function clearWizardState(Request $request): void
+    {
+        $request->session()->forget($this->wizardStateKey());
+    }
+
+    private function wizardStateKey(): string
+    {
+        $userId = Auth::id() ?? 0;
+
+        return sprintf('backup_downloader_wizard.server_%d.user_%d', $this->server->id, $userId);
     }
 
     private function reportRuntimePluginError(\Throwable $exception): void
