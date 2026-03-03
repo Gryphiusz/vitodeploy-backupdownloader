@@ -18,7 +18,6 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
-use Illuminate\Validation\ValidationException;
 
 class GenerateBackupDownloadLink extends Action
 {
@@ -62,11 +61,7 @@ class GenerateBackupDownloadLink extends Action
     private function buildForm(): DynamicForm
     {
         $sites = $this->serverSites();
-        $allFiles = $this->recentAvailableBackupFiles();
-        $selection = $this->selectionState();
-        $siteOptions = $this->siteOptionsFromBackups($sites, $allFiles);
-        $selectedSite = $selection['site'] ?? ($siteOptions[0] ?? 'unknown');
-        $selectedType = $selection['type'] ?? 'file';
+        $allFiles = $this->recentAvailableBackupFiles(7);
 
         $openBackupsField = DynamicField::make('backup_downloader_open_backups_page')
             ->alert()
@@ -85,7 +80,7 @@ class GenerateBackupDownloadLink extends Action
         $fields[] = DynamicField::make('backup_downloader_wizard_state')
             ->alert()
             ->options(['type' => 'info'])
-            ->description('Select site, backup type, and backup file below, then submit once to generate the link.');
+            ->description('Calendar view shows the last 7 days. Pick a backup directly from the list below and generate the link.');
 
         $latestLink = $this->latestLink();
         if ($latestLink !== null) {
@@ -135,39 +130,25 @@ class GenerateBackupDownloadLink extends Action
             $fields[] = DynamicField::make('backup_downloader_empty')
                 ->alert()
                 ->options(['type' => 'warning'])
-                ->description('No downloadable backup files found yet. Run a backup first, then generate a link.');
+                ->description('No downloadable backup files found for the last 7 days. Run a backup first, then generate a link.');
 
             return DynamicForm::make($fields);
         }
 
-        $fields[] = DynamicField::make('site_key')
-            ->select()
-            ->label('Step 1: Select Site')
-            ->options($siteOptions)
-            ->default($selectedSite);
+        $fields[] = DynamicField::make('backup_downloader_calendar_overview')
+            ->alert()
+            ->options(['type' => 'info'])
+            ->label('Last 7 Days Overview')
+            ->description($this->backupCalendarOverview($allFiles));
 
-        $fields[] = DynamicField::make('backup_type')
-            ->select()
-            ->label('Step 2: Select Backup Type')
-            ->options(['file', 'database'])
-            ->default($selectedType);
-
-        $options = $this->backupFileOptions($sites, $allFiles, $selectedSite, $selectedType);
-        if ($options === []) {
-            $fields[] = DynamicField::make('backup_downloader_filtered_empty')
-                ->alert()
-                ->options(['type' => 'warning'])
-                ->description('No backups match the currently selected site/type. Change selection and submit once to refresh.');
-
-            return DynamicForm::make($fields);
-        }
+        $options = $this->backupFileOptions($sites, $allFiles);
 
         $fields[] = DynamicField::make('backup_file')
             ->select()
-            ->label('Step 3: Select Backup File')
+            ->label('Select Backup File (Last 7 Days)')
             ->options($options)
             ->default($options[0])
-            ->description('Format: ID | source(path/db) | created_at. Must match selected site and type.');
+            ->description('Format: #ID | TYPE | SITE | SOURCE | date time.');
 
         $fields[] = DynamicField::make('expiration_minutes')
             ->select()
@@ -184,28 +165,12 @@ class GenerateBackupDownloadLink extends Action
         Validator::make($request->all(), [
             'backup_file' => ['nullable', 'string', 'max:1000'],
             'backup_file_id' => ['nullable', 'integer'],
-            'site_key' => ['required', 'string', 'max:255'],
-            'backup_type' => ['required', 'in:file,database'],
             'expiration_minutes' => ['nullable', 'integer', 'in:5,15,30,60'],
         ])->validate();
 
-        $sites = $this->serverSites();
-        $allFiles = $this->recentAvailableBackupFiles();
+        $allFiles = $this->recentAvailableBackupFiles(7);
         if ($allFiles->isEmpty()) {
-            abort(422, 'No downloadable backup files found yet.');
-        }
-
-        $selectedSite = Str::lower(trim((string) $request->input('site_key', '')));
-        $selectedType = (string) $request->input('backup_type', '');
-
-        $selection = $this->selectionState();
-        $selectionChanged = ($selection['site'] ?? null) !== $selectedSite
-            || ($selection['type'] ?? null) !== $selectedType;
-        if ($selectionChanged) {
-            $this->putSelectionState($request, $selectedSite, $selectedType);
-            throw ValidationException::withMessages([
-                'backup_file' => 'Selection updated. Backup list is now filtered. Choose a backup file and submit again.',
-            ]);
+            abort(422, 'No downloadable backup files found for the last 7 days.');
         }
 
         $backupFileId = $this->extractBackupFileId((string) $request->input('backup_file', ''));
@@ -214,6 +179,13 @@ class GenerateBackupDownloadLink extends Action
         }
         if ($backupFileId === null) {
             abort(422, 'Please select a backup file.');
+        }
+
+        $isInCalendarWindow = $allFiles->contains(
+            fn (BackupFile $file): bool => (int) $file->id === (int) $backupFileId
+        );
+        if (! $isInCalendarWindow) {
+            abort(422, 'Selected backup file is outside the last 7 days calendar window.');
         }
 
         $backupFile = BackupFile::query()
@@ -226,15 +198,6 @@ class GenerateBackupDownloadLink extends Action
 
         if (! $backupFile->isAvailable()) {
             abort(422, 'Selected backup file is not available for download yet.');
-        }
-
-        if ((string) $backupFile->backup->type->value !== $selectedType) {
-            abort(422, 'Selected backup file does not match the selected backup type.');
-        }
-
-        $resolvedSiteKey = $this->siteKeyForBackupFile($backupFile, $sites);
-        if ($resolvedSiteKey !== $selectedSite) {
-            abort(422, 'Selected backup file does not match the selected site.');
         }
 
         $userId = Auth::id();
@@ -252,7 +215,6 @@ class GenerateBackupDownloadLink extends Action
             'expires_at' => now()->addMinutes($minutes),
         ]);
 
-        $this->putSelectionState($request, $selectedSite, $selectedType);
         $request->session()->flash(
             'success',
             sprintf(
@@ -267,43 +229,12 @@ class GenerateBackupDownloadLink extends Action
     /**
      * @return array<int, string>
      */
-    private function backupFileOptions(Collection $sites, Collection $allFiles, string $selectedSite, string $selectedType): array
+    private function backupFileOptions(Collection $sites, Collection $allFiles): array
     {
         return $allFiles
-            ->filter(function (BackupFile $file) use ($sites, $selectedSite, $selectedType): bool {
-                if ($file->backup === null) {
-                    return false;
-                }
-
-                if ((string) $file->backup->type->value !== $selectedType) {
-                    return false;
-                }
-
-                return $this->siteKeyForBackupFile($file, $sites) === $selectedSite;
-            })
             ->map(fn (BackupFile $file): string => $this->backupFileLabel($file, $sites))
             ->values()
             ->all();
-    }
-
-    /**
-     * @return array<int, string>
-     */
-    private function siteOptionsFromBackups(Collection $sites, Collection $allFiles): array
-    {
-        $siteOptions = $allFiles
-            ->map(fn (BackupFile $file): string => $this->siteKeyForBackupFile($file, $sites))
-            ->unique()
-            ->values()
-            ->all();
-
-        sort($siteOptions);
-
-        if ($siteOptions === []) {
-            return ['unknown'];
-        }
-
-        return $siteOptions;
     }
 
     private function latestLink(): ?BackupDownloadLink
@@ -325,20 +256,24 @@ class GenerateBackupDownloadLink extends Action
     /**
      * @return Collection<int, BackupFile>
      */
-    private function recentAvailableBackupFiles(): Collection
+    private function recentAvailableBackupFiles(int $lastDays = 7): Collection
     {
+        $lastDays = max(1, $lastDays);
+        $cutoff = now()->copy()->startOfDay()->subDays($lastDays - 1);
+
         return BackupFile::query()
             ->whereNotIn('status', [
                 BackupFileStatus::CREATING->value,
                 BackupFileStatus::FAILED->value,
                 BackupFileStatus::DELETING->value,
             ])
+            ->where('created_at', '>=', $cutoff)
             ->whereHas('backup', function ($query): void {
                 $query->where('server_id', $this->server->id);
             })
             ->with(['backup.database'])
             ->latest('id')
-            ->limit(20)
+            ->limit(500)
             ->get();
     }
 
@@ -361,10 +296,43 @@ class GenerateBackupDownloadLink extends Action
 
     private function backupFileLabel(BackupFile $file, Collection $sites): string
     {
+        $type = strtoupper((string) ($file->backup?->type->value ?? 'unknown'));
+        $site = $this->backupSiteLabel($file, $sites);
         $source = $this->backupSourceLabel($file);
-        $createdAt = $file->created_at?->toDateTimeString() ?? '-';
+        $createdAt = $file->created_at?->format('Y-m-d H:i:s') ?? '-';
 
-        return sprintf('#%d | %s | %s', $file->id, $source, $createdAt);
+        return sprintf('#%d | %s | %s | %s | %s', $file->id, $type, $site, $source, $createdAt);
+    }
+
+    private function backupCalendarOverview(Collection $allFiles): string
+    {
+        $parts = [];
+
+        for ($offset = 0; $offset < 7; $offset++) {
+            $day = now()->copy()->startOfDay()->subDays($offset);
+            $dayKey = $day->format('Y-m-d');
+
+            $dayFiles = $allFiles->filter(
+                fn (BackupFile $file): bool => $file->created_at?->format('Y-m-d') === $dayKey
+            );
+
+            $fileCount = $dayFiles->filter(
+                fn (BackupFile $file): bool => (string) ($file->backup?->type->value ?? '') === 'file'
+            )->count();
+            $databaseCount = $dayFiles->filter(
+                fn (BackupFile $file): bool => (string) ($file->backup?->type->value ?? '') === 'database'
+            )->count();
+
+            $parts[] = sprintf(
+                '%s: total %d (files %d, databases %d)',
+                $dayKey,
+                $dayFiles->count(),
+                $fileCount,
+                $databaseCount
+            );
+        }
+
+        return implode(' | ', $parts);
     }
 
     private function backupSourceLabel(BackupFile $file): string
@@ -590,48 +558,6 @@ class GenerateBackupDownloadLink extends Action
         }
 
         return url('/servers/'.$this->server->id.'/backups');
-    }
-
-    /**
-     * @return array{site:?string,type:?string}
-     */
-    private function selectionState(): array
-    {
-        try {
-            $state = request()->session()->get($this->selectionStateKey(), []);
-        } catch (\Throwable) {
-            $state = [];
-        }
-
-        if (! is_array($state)) {
-            $state = [];
-        }
-
-        $site = isset($state['site']) ? Str::lower(trim((string) $state['site'])) : null;
-        $type = isset($state['type']) ? trim((string) $state['type']) : null;
-        if (! in_array($type, ['file', 'database'], true)) {
-            $type = null;
-        }
-
-        return [
-            'site' => $site !== '' ? $site : null,
-            'type' => $type,
-        ];
-    }
-
-    private function putSelectionState(Request $request, string $site, string $type): void
-    {
-        $request->session()->put($this->selectionStateKey(), [
-            'site' => Str::lower(trim($site)),
-            'type' => $type,
-        ]);
-    }
-
-    private function selectionStateKey(): string
-    {
-        $userId = Auth::id() ?? 0;
-
-        return sprintf('backup_downloader_selection.server_%d.user_%d', $this->server->id, $userId);
     }
 
     private function reportRuntimePluginError(\Throwable $exception): void
